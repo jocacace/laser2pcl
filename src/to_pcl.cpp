@@ -39,28 +39,34 @@
 #include <pcl/conversions.h>
 #include <pcl_ros/transforms.h>
 #include <pcl/visualization/pcl_visualizer.h>
-
+#include "sensor_msgs/Imu.h"
 
 using namespace Eigen;
 
 class L2PCL {
      public:
         L2PCL();
-        //void scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan);
-        void scanCallback( sensor_msgs::LaserScan scan);
+        void scanCallback(const sensor_msgs::LaserScan::ConstPtr&  scan);
+        void imuCallback(const sensor_msgs::Imu::ConstPtr& imu);
+
      private:
+        
         ros::NodeHandle node_;
         laser_geometry::LaserProjection projector_;
         tf::TransformListener tfListener_;
 
         ros::Publisher point_cloud_publisher_;
         ros::Subscriber scan_sub_;
+        ros::Subscriber imu_sub_;
+        Vector3d _rpy;
 };
 
 L2PCL::L2PCL(){
-        scan_sub_ = node_.subscribe<sensor_msgs::LaserScan> ("/scan", 100, &L2PCL::scanCallback, this);
-        point_cloud_publisher_ = node_.advertise<sensor_msgs::PointCloud2> ("/cloud", 1, false);
-        //tfListener_.setExtrapolationLimit(ros::Duration(1000.5));
+  scan_sub_ = node_.subscribe<sensor_msgs::LaserScan> ("/scan", 100, &L2PCL::scanCallback, this);
+  point_cloud_publisher_ = node_.advertise<sensor_msgs::PointCloud2> ("/cloud", 1, false);
+  imu_sub_ = node_.subscribe<sensor_msgs::Imu>("/mavros/imu/data", 100, &L2PCL::imuCallback, this);
+  //tfListener_.setExtrapolationLimit(ros::Duration(1000.5));
+  _rpy << 0.0, 0.0, 0.0;
 
 }
 
@@ -96,32 +102,79 @@ Matrix3d XYZ2R(Vector3d angles) {
     return R;
 }
 
-void L2PCL::scanCallback(sensor_msgs::LaserScan  scan){
+Vector3d R2XYZ(Matrix3d R) {
+  double phi=0.0, theta=0.0, psi=0.0;
+  Vector3d XYZ = Vector3d::Zero();
+  
+  theta = asin(R(0,2));
+  
+  if(fabsf(cos(theta))>pow(10.0,-10.0))
+  {
+    phi=atan2(-R(1,2)/cos(theta), R(2,2)/cos(theta));
+    psi=atan2(-R(0,1)/cos(theta), R(0,0)/cos(theta));
+  }
+  else
+  {
+    if(fabsf(theta-M_PI/2.0)<pow(10.0,-5.0))
+    {
+      psi = 0.0;
+      phi = atan2(R(1,0), R(2,0));
+      theta = M_PI/2.0;
+    }
+    else
+    {
+      psi = 0.0;
+      phi = atan2(-R(1,0), R(2,0));
+      theta = -M_PI/2.0;
+    }
+  }
+  
+  XYZ << phi,theta,psi;
+  return XYZ;
+}
+
+Matrix3d QuatToMat(Vector4d Quat){
+    Matrix3d Rot;
+    float s = Quat[0];
+    float x = Quat[1];
+    float y = Quat[2];
+    float z = Quat[3];
+    Rot << 1-2*(y*y+z*z),2*(x*y-s*z),2*(x*z+s*y),
+    2*(x*y+s*z),1-2*(x*x+z*z),2*(y*z-s*x),
+    2*(x*z-s*y),2*(y*z+s*x),1-2*(x*x+y*y);
+    return Rot;
+}
+
+void L2PCL::imuCallback( const sensor_msgs::Imu::ConstPtr& imu ) {
+
+
+  _rpy = R2XYZ( QuatToMat( Vector4d( imu->orientation.w, imu->orientation.x, imu->orientation.y, imu->orientation.z )) );
+
+}
+
+void L2PCL::scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan){
+
 
 		// ROS PointCLoud2
     sensor_msgs::PointCloud2 cloud;
-    
+  
     try {
     
     	// From lidar to ROS PointCloud2
-		  projector_.transformLaserScanToPointCloud("lidar_link", scan, cloud, tfListener_);
+		  projector_.transformLaserScanToPointCloud("lidar_link", *scan, cloud, tfListener_);
 
+      
 			// From ROS PointCloud2 to pcl PointCloud2		  
 		  pcl::PCLPointCloud2 pcl_pc2;
-			pcl_conversions::toPCL(cloud, pcl_pc2);
-			 
+			pcl_conversions::toPCL(cloud, pcl_pc2);			 
 			// From pcl PointCloud2 to pcl PointCloud
 			pcl::PointCloud<pcl::PointXYZ> pcl1_cloud;
   		pcl::fromPCLPointCloud2(pcl_pc2, pcl1_cloud);
 			
-			double roll = 0.0;
-			double pitch = 0.0;
-			
-			Eigen::Matrix3d R = XYZ2R( Eigen::Vector3d( 0.5, 0.0, 1.5 ) );
+			Eigen::Matrix3d R = XYZ2R( Eigen::Vector3d( _rpy[0], _rpy[1], 0.0 ) );
 			
 			// Generate rotation matrix for the pointcloud 
 			Eigen::Matrix4f transform_1 = Eigen::Matrix4f::Identity();
-			
 			
 			transform_1 (0,0) = R(0,0);
 			transform_1 (0,1) = R(0,1);
@@ -132,8 +185,7 @@ void L2PCL::scanCallback(sensor_msgs::LaserScan  scan){
 			transform_1 (2,0) = R(2,0);
 			transform_1 (2,1) = R(2,1);
 			transform_1 (2,2) = R(2,2);
-		
-			
+	
 			
 			printf ("Rotate by using a Matrix4f\n");
 			std::cout << transform_1 << std::endl;
@@ -146,11 +198,10 @@ void L2PCL::scanCallback(sensor_msgs::LaserScan  scan){
 			pcl::toROSMsg(*transformed_cloud.get(),object_msg );
 			
 			point_cloud_publisher_.publish(object_msg);
-		  
+
 		}
 		catch (tf::TransformException &ex) {
 		  ROS_ERROR("%s", ex.what());
-		  //ros::Duration(0.05).sleep();
 		}
 		
 }
